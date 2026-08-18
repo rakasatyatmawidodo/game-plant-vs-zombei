@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Plants vs Zombies - JS Prototype</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #222;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        canvas {
+            border: 4px solid #4a3b2a;
+            background: #4CAF50; /* Warna rumput */
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #ui-bar {
+            width: 900px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            background: #333;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .stat { font-size: 20px; font-weight: bold; }
+        #sun-display { color: #FFD700; }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background: #8B4513;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover { background: #A0522D; }
+        button:disabled { background: #555; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-bar">
+        <div class="stat">☀️ Matahari: <span id="sun-display">100</span></div>
+        <div class="stat">Skor: <span id="score-display">0</span></div>
+        <button id="plant-btn" onclick="selectPlant()">🌱 Tanam Peashooter (50☀️)</button>
+    </div>
+
+    <canvas id="gameCanvas" width="900" height="500"></canvas>
+    <p style="color:#aaa; font-size: 14px;">Klik kotak hijau untuk menanam. Kumpulkan matahari kuning yang jatuh!</p>
+
+<script>
+/**
+ * MINI PVZ ENGINE
+ * Dibuat oleh Qwen3.8
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- KONFIGURASI GAME ---
+const CELL_SIZE = 100;
+const GRID_COLS = 9;
+const GRID_ROWS = 5;
+const PLANT_COST = 50;
+const SUN_VALUE = 25;
+const ZOMBIE_SPAWN_RATE = 300; // Frame
+
+// --- STATE GAME ---
+let sun = 100;
+let score = 0;
+let frame = 0;
+let gameOver = false;
+let selectedPlant = false;
+
+// Array entitas
+const plants = [];
+const zombies = [];
+const projectiles = [];
+const suns = [];
+const gridState = []; // 0 = kosong, 1 = ada tanaman
+
+// Inisialisasi Grid
+for (let r = 0; r < GRID_ROWS; r++) {
+    gridState[r] = [];
+    for (let c = 0; c < GRID_COLS; c++) {
+        gridState[r][c] = 0;
+    }
+}
+
+// --- KELAS ENTITAS ---
+
+class Plant {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.width = CELL_SIZE - 10;
+        this.height = CELL_SIZE - 10;
+        this.health = 100;
+        this.shootTimer = 0;
+        this.shootInterval = 100;
+    }
+
+    draw() {
+        ctx.fillStyle = '#00FF00'; // Hijau terang
+        ctx.beginPath();
+        ctx.arc(this.x + CELL_SIZE/2, this.y + CELL_SIZE/2, 30, 0, Math.PI * 2);
+        ctx.fill();
+        // Mata
+        ctx.fillStyle = 'black';
+        ctx.beginPath();
+        ctx.arc(this.x + CELL_SIZE/2 + 10, this.y + CELL_SIZE/2 - 10, 5, 0, Math.PI * 2);
+        ctx.fill();
+        // Health bar mini
+        ctx.fillStyle = 'red';
+        ctx.fillRect(this.x + 10, this.y + 10, 80, 5);
+        ctx.fillStyle = 'lime';
+        ctx.fillRect(this.x + 10, this.y + 10, (this.health / 100) * 80, 5);
+    }
+
+    update() {
+        this.shootTimer++;
+        // Cek apakah ada zombie di lajur ini
+        const row = Math.floor(this.y / CELL_SIZE);
+        const zombieInRow = zombies.some(z => 
+            Math.floor(z.y / CELL_SIZE) === row && z.x > this.x
+        );
+
+        if (this.shootTimer >= this.shootInterval && zombieInRow) {
+            projectiles.push(new Projectile(this.x + 70, this.y + 35));
+            this.shootTimer = 0;
+        }
+    }
+}
+
+class Zombie {
+    constructor(y) {
+        this.x = canvas.width;
+        this.y = y;
+        this.width = CELL_SIZE - 10;
+        this.height = CELL_SIZE - 10;
+        this.speed = 0.4;
+        this.health = 200;
+        this.maxHealth = 200;
+        this.eating = false;
+        this.damage = 0.5;
+    }
+
+    draw() {
+        ctx.fillStyle = this.eating ? '#8B0000' : '#556B2F'; // Merah gelap saat makan
+        ctx.fillRect(this.x + 15, this.y + 15, this.width - 30, this.height - 30);
+        
+        // Kepala
+        ctx.fillStyle = '#9ACD32';
+        ctx.beginPath();
+        ctx.arc(this.x + CELL_SIZE/2, this.y + 25, 20, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Health Bar
+        ctx.fillStyle = 'red';
+        ctx.fillRect(this.x + 10, this.y - 10, 80, 6);
+        ctx.fillStyle = 'purple';
+        ctx.fillRect(this.x + 10, this.y - 10, (this.health / this.maxHealth) * 80, 6);
+    }
+
+    update() {
+        this.eating = false;
+        // Cek tabrakan dengan tanaman
+        for (let i = 0; i < plants.length; i++) {
+            const p = plants[i];
+            if (Math.abs(p.x - this.x) < 50 && Math.abs(p.y - this.y) < 50) {
+                this.eating = true;
+                p.health -= this.damage;
+                return; // Berhenti bergerak saat makan
+            }
+        }
+        this.x -= this.speed;
+    }
+}
+
+class Projectile {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.radius = 8;
+        this.speed = 5;
+        this.damage = 20;
+        this.markedForDeletion = false;
+    }
+
+    draw() {
+        ctx.fillStyle = '#ADFF2F';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    update() {
+        this.x += this.speed;
+        if (this.x > canvas.width) this.markedForDeletion = true;
+    }
+}
+
+class Sun {
+    constructor(x, y, targetY) {
+        this.x = x;
+        this.y = y;
+        this.targetY = targetY;
+        this.radius = 20;
+        this.speed = 1;
+        this.markedForDeletion = false;
+        this.lifeTime = 500;
+    }
+
+    draw() {
+        ctx.fillStyle = '#FFD700';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#FFA500';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Efek bersinar
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius + 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+
+    update() {
+        if (this.y < this.targetY) {
+            this.y += this.speed;
+        }
+        this.lifeTime--;
+        if (this.lifeTime <= 0) this.markedForDeletion = true;
+    }
+}
+
+// --- INPUT HANDLING ---
+
+function selectPlant() {
+    if (sun >= PLANT_COST) {
+        selectedPlant = !selectedPlant;
+        document.getElementById('plant-btn').style.background = selectedPlant ? '#FFD700' : '#8B4513';
+        document.getElementById('plant-btn').style.color = selectedPlant ? 'black' : 'white';
+    }
+}
+
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // 1. Cek klik pada Matahari
+    let clickedSun = false;
+    suns.forEach(s => {
+        const dist = Math.hypot(s.x - x, s.y - y);
+        if (dist < s.radius + 10) {
+            sun += SUN_VALUE;
+            s.markedForDeletion = true;
+            clickedSun = true;
+        }
+    });
+    if (clickedSun) { updateUI(); return; }
+
+    // 2. Menanam
+    if (selectedPlant && sun >= PLANT_COST) {
+        const col = Math.floor(x / CELL_SIZE);
+        const row = Math.floor(y / CELL_SIZE);
+
+        if (col >= 0 && col < GRID_COLS && row >= 0 && row < GRID_ROWS) {
+            if (gridState[row][col] === 0) {
+                plants.push(new Plant(col * CELL_SIZE, row * CELL_SIZE));
+                gridState[row][col] = 1;
+                sun -= PLANT_COST;
+                selectedPlant = false;
+                document.getElementById('plant-btn').style.background = '#8B4513';
+                document.getElementById('plant-btn').style.color = 'white';
+                updateUI();
+            }
+        }
+    }
+});
+
+function updateUI() {
+    document.getElementById('sun-display').innerText = Math.floor(sun);
+    document.getElementById('score-display').innerText = score;
+    document.getElementById('plant-btn').disabled = sun < PLANT_COST;
+}
+
+// --- GAME LOOP UTAMA ---
+
+function animate() {
+    if (gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'white';
+        ctx.font = '50px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('ZOMBIES MEMAKAN OTAKMU!', canvas.width/2, canvas.height/2);
+        ctx.font = '20px Arial';
+        ctx.fillText(`Skor Akhir: ${score} | Refresh untuk main lagi`, canvas.width/2, canvas.height/2 + 50);
+        return;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Gambar Grid Lines (opsional, agar rapi)
+    ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+    ctx.lineWidth = 1;
+    for(let i=0; i<=GRID_COLS; i++) {
+        ctx.beginPath(); ctx.moveTo(i*CELL_SIZE, 0); ctx.lineTo(i*CELL_SIZE, canvas.height); ctx.stroke();
+    }
+    for(let i=0; i<=GRID_ROWS; i++) {
+        ctx.beginPath(); ctx.moveTo(0, i*CELL_SIZE); ctx.lineTo(canvas.width, i*CELL_SIZE); ctx.stroke();
+    }
+
+    // Spawn Matahari
+    if (frame % 200 === 0) {
+        const sx = Math.random() * (canvas.width - 50) + 25;
+        const ty = Math.random() * (canvas.height - 100) + 50;
+        suns.push(new Sun(sx, -30, ty));
+    }
+
+    // Spawn Zombie
+    if (frame % ZOMBIE_SPAWN_RATE === 0) {
+        const row = Math.floor(Math.random() * GRID_ROWS);
+        zombies.push(new Zombie(row * CELL_SIZE));
+    }
+
+    // Update & Draw Plants
+    for (let i = plants.length - 1; i >= 0; i--) {
+        plants[i].update();
+        plants[i].draw();
+        if (plants[i].health <= 0) {
+            const r = Math.floor(plants[i].y / CELL_SIZE);
+            const c = Math.floor(plants[i].x / CELL_SIZE);
+            gridState[r][c] = 0;
+            plants.splice(i, 1);
+        }
+    }
+
+    // Update & Draw Projectiles
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+        projectiles[i].update();
+        projectiles[i].draw();
+        
+        // Tabrakan Peluru vs Zombie
+        for (let j = zombies.length - 1; j >= 0; j--) {
+            const z = zombies[j];
+            if (projectiles[i] && 
+                projectiles[i].x > z.x && 
+                projectiles[i].x < z.x + z.width &&
+                Math.abs(projectiles[i].y - (z.y + z.height/2)) < 30) {
+                
+                z.health -= projectiles[i].damage;
+                projectiles[i].markedForDeletion = true;
+                
+                if (z.health <= 0) {
+                    zombies.splice(j, 1);
+                    score += 10;
+                    updateUI();
+                }
+            }
+        }
+        if (projectiles[i].markedForDeletion) projectiles.splice(i, 1);
+    }
+
+    // Update & Draw Zombies
+    for (let i = zombies.length - 1; i >= 0; i--) {
+        zombies[i].update();
+        zombies[i].draw();
+        if (zombies[i].x < 0) {
+            gameOver = true;
+        }
+    }
+
+    // Update & Draw Suns
+    for (let i = suns.length - 1; i >= 0; i--) {
+        suns[i].update();
+        suns[i].draw();
+        if (suns[i].markedForDeletion) suns.splice(i, 1);
+    }
+
+    frame++;
+    requestAnimationFrame(animate);
+}
+
+// Mulai Game
+updateUI();
+animate();
+
+</script>
+</body>
+</html>
